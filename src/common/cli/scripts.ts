@@ -111,6 +111,13 @@ export class XcodeBuildSettings {
   }
 
   /**
+   * Absolute path to the build products directory (e.g., .../Build/Products/<Config>)
+   */
+  get buildProductsDir() {
+    return this.targetBuildDir;
+  }
+
+  /**
    * Path to the executable file (inside the .app bundle) to be used for running macOS apps
    */
   get executablePath() {

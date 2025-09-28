@@ -57,10 +57,16 @@ import {
 import { ProgressStatusBar } from "./system/status-bar.js";
 import {
   buildForTestingCommand,
+  refreshTestsCommand,
+  runAllTestsCommand,
+  runTestByNameCommand,
   selectConfigurationForTestingCommand,
   selectTestingTargetCommand,
   selectXcodeSchemeForTestingCommand,
   testWithoutBuildingCommand,
+  runWithoutBuildingCommand,
+  debugWithoutBuildingCommand,
+  debugSelectedTestsCommand,
 } from "./testing/commands.js";
 import { TestingManager } from "./testing/manager.js";
 import { installToolCommand, openDocumentationCommand } from "./tools/commands.js";
@@ -164,9 +170,15 @@ export function activate(context: vscode.ExtensionContext) {
   // Testing
   d(command("sweetpad.testing.buildForTesting", buildForTestingCommand));
   d(command("sweetpad.testing.testWithoutBuilding", testWithoutBuildingCommand));
+  d(command("sweetpad.testing.runWithoutBuilding", runWithoutBuildingCommand));
+  d(command("sweetpad.testing.debugWithoutBuilding", debugWithoutBuildingCommand));
   d(command("sweetpad.testing.selectTarget", selectTestingTargetCommand));
   d(command("sweetpad.testing.setDefaultScheme", selectXcodeSchemeForTestingCommand));
   d(command("sweetpad.testing.selectConfiguration", selectConfigurationForTestingCommand));
+  d(command("sweetpad.testing.refreshTests", refreshTestsCommand));
+  d(command("sweetpad.testing.runAll", runAllTestsCommand));
+  d(command("sweetpad.testing.runTestByName", runTestByNameCommand));
+  d(command("sweetpad.testing.debugSelected", debugSelectedTestsCommand));
 
   // Debugging
   d(registerDebugConfigurationProvider(_context));

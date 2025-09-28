@@ -8,6 +8,16 @@ import { updateWorkspaceConfig } from "../common/config";
 import { showInputBox } from "../common/quick-pick";
 import { askSchemeForTesting, askTestingTarget } from "./utils";
 
+export async function debugWithoutBuildingCommand(
+  context: ExtensionContext,
+  ...items: vscode.TestItem[]
+): Promise<void> {
+  context.updateProgressStatus("Debugging tests without building (macOS)");
+  const request = new vscode.TestRunRequest(items, [], undefined, undefined);
+  const tokenSource = new vscode.CancellationTokenSource();
+  await (context.testingManager as any).debugTestsMacOSWithoutBuilding(request, tokenSource.token);
+}
+
 export async function selectTestingTargetCommand(context: ExtensionContext): Promise<void> {
   context.updateProgressStatus("Searching for workspace");
   const xcworkspace = await askXcodeWorkspacePath(context);
@@ -33,6 +43,83 @@ export async function testWithoutBuildingCommand(
   const request = new vscode.TestRunRequest(items, [], undefined, undefined);
   const tokenSource = new vscode.CancellationTokenSource();
   await context.testingManager.runTestsWithoutBuilding(request, tokenSource.token);
+}
+
+export async function runWithoutBuildingCommand(
+  context: ExtensionContext,
+  ...items: vscode.TestItem[]
+): Promise<void> {
+  // Same as testWithoutBuildingCommand but with a different name for clarity
+  await testWithoutBuildingCommand(context, ...items);
+}
+
+/**
+ * Force re-scan of the workspace to refresh discovered tests
+ */
+export async function refreshTestsCommand(context: ExtensionContext): Promise<void> {
+  context.updateProgressStatus("Refreshing discovered tests");
+  await context.testingManager.refreshAllTests();
+}
+
+/**
+ * Run all discovered tests (without manual selection)
+ */
+export async function runAllTestsCommand(context: ExtensionContext): Promise<void> {
+  context.updateProgressStatus("Running all discovered tests");
+  const request = new vscode.TestRunRequest(undefined, [], undefined, undefined);
+  const tokenSource = new vscode.CancellationTokenSource();
+  await context.testingManager.buildAndRunTests(request, tokenSource.token);
+}
+
+/**
+ * Quick pick to run a test by name (Class or Class.method)
+ */
+export async function runTestByNameCommand(context: ExtensionContext): Promise<void> {
+  context.updateProgressStatus("Searching tests by name");
+
+  const items: { label: string; item: vscode.TestItem }[] = [];
+  for (const [, root] of context.testingManager.controller.items) {
+    items.push({ label: root.id, item: root });
+    for (const [, child] of root.children) {
+      items.push({ label: child.id, item: child });
+    }
+  }
+
+  if (items.length === 0) {
+    vscode.window.showInformationMessage("No tests discovered.");
+    return;
+  }
+
+  const selected = await vscode.window.showQuickPick(items.map((i) => i.label), { placeHolder: "Run Test by Name" });
+  if (!selected) return;
+  const match = items.find((i) => i.label === selected);
+  if (!match) return;
+
+  const request = new vscode.TestRunRequest([match.item], [], undefined, undefined);
+  const tokenSource = new vscode.CancellationTokenSource();
+  await context.testingManager.buildAndRunTests(request, tokenSource.token);
+}
+
+/**
+ * Debug currently selected tests via the Debug test profile (macOS)
+ */
+export async function debugSelectedTestsCommand(
+  context: ExtensionContext,
+  ...items: vscode.TestItem[]
+): Promise<void> {
+  context.updateProgressStatus("Debugging selected tests (macOS)");
+  const request = new vscode.TestRunRequest(items, [], undefined, undefined);
+  // Use TestController's Debug profile by name
+  const debugProfile = context.testingManager.controller.createRunProfile(
+    "__temp__",
+    vscode.TestRunProfileKind.Debug,
+    async () => {},
+  );
+  try {
+    await (context.testingManager as any).debugTestsMacOS(request, new vscode.CancellationTokenSource().token);
+  } finally {
+    debugProfile.dispose();
+  }
 }
 
 export async function selectXcodeSchemeForTestingCommand(context: ExtensionContext, item?: BuildTreeItem) {

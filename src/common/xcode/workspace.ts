@@ -109,6 +109,16 @@ export class XcodeWorkspace {
     return projects;
   }
 
+  /** Find test bundle targets containing a given source file across all projects in this workspace */
+  async getTestTargetsForFile(absPath: string): Promise<string[]> {
+    const projects = await this.getProjects();
+    const results: string[] = [];
+    for (const project of projects) {
+      results.push(...project.getTestTargetsForFile(absPath));
+    }
+    return Array.from(new Set(results));
+  }
+
   async getScheme(options: {
     name: string;
   }): Promise<XcodeScheme | null> {

@@ -509,7 +509,8 @@ async function runTaskV2(
   const currentScope = context.getExecutionScope();
   const task = new vscode.Task(
     {
-      type: "custom",
+      type: "sweetpad",
+      action: options.name,
       lockId: options.lock,
     },
     vscode.TaskScope.Workspace,

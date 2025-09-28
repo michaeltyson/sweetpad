@@ -35,17 +35,22 @@ export async function askTestingTarget(
     return null;
   }
 
-  // Auto select target if only one found
-  if (targets.length === 1 && !options.force) {
-    const targetName = targets[0];
+  // Prefer test bundle targets (exclude UITests)
+  const isLikelyTestTarget = (name: string) => /(\b|\s)Tests\b|\bUnitTests\b/i.test(name) && !/UITests/i.test(name);
+  const testTargets = targets.filter(isLikelyTestTarget);
+
+  // Auto select if there is exactly one test target
+  if (testTargets.length === 1 && !options.force) {
+    const targetName = testTargets[0];
     context.testingManager.setDefaultTestingTarget(targetName);
     return targetName;
   }
 
   // Offer user to select target if multiple found
+  const shownTargets = testTargets.length > 0 ? testTargets : targets;
   const target = await showQuickPick({
     title: options.title,
-    items: targets.map((target) => {
+    items: shownTargets.map((target) => {
       return {
         label: target,
         description: target === cachedTarget ? "(current)" : undefined,

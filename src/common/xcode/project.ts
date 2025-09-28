@@ -15,6 +15,7 @@ export interface XcodeProject {
   getTargets(): string[];
   getSchemes(): Promise<XcodeScheme[]>;
   getScheme(name: string): Promise<XcodeScheme | null>;
+  getTestTargetsForFile(absPath: string): string[];
 }
 
 export class XcodeScheme {
@@ -127,6 +128,32 @@ export class XcodeScheme {
 
     // BlueprintName == TargetName
     return buildableReference.attributes.BlueprintName || "";
+  }
+
+  /**
+   * Get testable target names from the scheme's TestAction/Testables
+   */
+  async getTestableTargets(): Promise<string[]> {
+    const xml = await this.getXml();
+    if (!xml) return [];
+    const root = xml.root;
+    if (!root) return [];
+
+    const testAction = root.children.filter(isXMLElement).find((e) => e.name === "TestAction");
+    if (!testAction) return [];
+
+    const testables = testAction.children.filter(isXMLElement).find((e) => e.name === "Testables");
+    if (!testables) return [];
+
+    const testableRefs = testables.children.filter(isXMLElement).filter((e) => e.name === "TestableReference");
+    const targets: string[] = [];
+    for (const tref of testableRefs) {
+      const buildableRef = tref.children.filter(isXMLElement).find((e) => e.name === "BuildableReference");
+      if (!buildableRef) continue;
+      const targetName = (buildableRef.attributes as any)?.BlueprintName as string | undefined;
+      if (targetName) targets.push(targetName);
+    }
+    return targets;
   }
 
   static fromFile(options: { schemePath: string; project: XcodeProject }): XcodeScheme {
@@ -254,6 +281,38 @@ export class XcodeProjectBaconParser implements XcodeProject {
     const schemes = await this.getSchemes();
     return schemes.map((scheme) => scheme.name);
   }
+
+  getTestTargetsForFile(absPath: string): string[] {
+    try {
+      const projectDir = path.dirname(this.projectPath);
+      const targets: any[] = (this.parsed.rootObject as any)?.props?.targets ?? [];
+      const results: string[] = [];
+      const base = path.basename(absPath);
+
+      for (const target of targets) {
+        const productType: string | undefined = target?.props?.productType;
+        if (productType !== "com.apple.product-type.bundle.unit-test") continue;
+        const targetName: string | undefined = target?.props?.name;
+        const buildPhases: any[] = target?.props?.buildPhases ?? [];
+        const sourcesPhase = buildPhases.find((bp: any) => bp?.isa === "PBXSourcesBuildPhase");
+        if (!sourcesPhase) continue;
+        const files: any[] = sourcesPhase?.props?.files ?? [];
+        for (const bf of files) {
+          const fileRef = bf?.props?.fileRef;
+          const filePath: string | undefined = fileRef?.props?.path;
+          if (!filePath) continue;
+          const resolved = path.isAbsolute(filePath) ? filePath : path.join(projectDir, filePath);
+          if ((resolved === absPath || path.basename(resolved) === base) && targetName) {
+            results.push(targetName);
+            break;
+          }
+        }
+      }
+      return results;
+    } catch {
+      return [];
+    }
+  }
 }
 
 export class XcodeProjectFallbackParser implements XcodeProject {
@@ -295,6 +354,47 @@ export class XcodeProjectFallbackParser implements XcodeProject {
 
   async getScheme(name: string): Promise<XcodeScheme | null> {
     return await XcodeScheme.getScheme(this, name);
+  }
+
+  getTestTargetsForFile(absPath: string): string[] {
+    try {
+      const projectDir = path.dirname(this.projectPath);
+      const objects: any = this.parsed.objects ?? {};
+
+      const resolveFileRefPath = (fileRefId: string): string | null => {
+        const fileRef = objects[fileRefId];
+        const p: string | undefined = fileRef?.path;
+        if (!p) return null;
+        return path.isAbsolute(p) ? p : path.join(projectDir, p);
+      };
+
+      const results: string[] = [];
+      const base = path.basename(absPath);
+      const targets = Object.values(objects).filter((o: any) => o.isa === "PBXNativeTarget");
+      for (const target of targets as any[]) {
+        if (target.productType !== "com.apple.product-type.bundle.unit-test") continue;
+        const targetName: string | undefined = target.name;
+        const buildPhases: string[] = target.buildPhases ?? [];
+        for (const bpId of buildPhases) {
+          const bp = objects[bpId];
+          if (bp?.isa !== "PBXSourcesBuildPhase") continue;
+          const files: string[] = bp.files ?? [];
+          for (const bfId of files) {
+            const bf = objects[bfId];
+            const fileRefId: string | undefined = bf?.fileRef;
+            if (!fileRefId) continue;
+            const resolved = resolveFileRefPath(fileRefId);
+            if (resolved && (resolved === absPath || path.basename(resolved) === base)) {
+              if (targetName) results.push(targetName);
+              break;
+            }
+          }
+        }
+      }
+      return results;
+    } catch {
+      return [];
+    }
   }
 }
 

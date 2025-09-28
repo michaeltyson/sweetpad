@@ -390,6 +390,39 @@
         "icon": "$(repo-sync)"
       },
       {
+        "command": "sweetpad.testing.refreshTests",
+        "title": "SweetPad.Testing: Refresh discovered tests",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sweetpad.testing.runAll",
+        "title": "SweetPad.Testing: Run all tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "sweetpad.testing.runTestByName",
+        "title": "SweetPad.Testing: Run test by name",
+        "icon": "$(search)"
+      },
+      {
+        "command": "sweetpad.testing.debugSelected",
+        "title": "SweetPad.Testing: Debug selected tests (macOS)",
+        "icon": "$(debug)",
+        "category": "SweetPad"
+      },
+      {
+        "command": "sweetpad.testing.debugWithoutBuilding",
+        "title": "SweetPad.Testing: Debug without building (macOS)",
+        "icon": "$(debug-alt)",
+        "category": "SweetPad"
+      },
+      {
+        "command": "sweetpad.testing.runWithoutBuilding",
+        "title": "SweetPad.Testing: Run without building",
+        "icon": "$(repo-sync)",
+        "category": "SweetPad"
+      },
+      {
         "command": "sweetpad.testing.setDefaultScheme",
         "title": "SweetPad.Testing: Set scheme for testing",
         "icon": "$(file-code)"
@@ -673,23 +706,46 @@
       ],
       "testing/item/context": [
         {
+          "command": "sweetpad.testing.debugWithoutBuilding",
+          "when": "true",
+          "group": "inline@1"
+        },
+        {
+          "command": "sweetpad.testing.testWithoutBuilding",
+          "when": "true",
+          "group": "inline@2"  
+        },
+        {
           "command": "sweetpad.testing.selectTarget",
           "group": "context@1"
         },
         {
           "command": "sweetpad.testing.buildForTesting",
           "group": "context@2"
-        },
-        {
-          "command": "sweetpad.testing.testWithoutBuilding",
-          "group": "inline@3"
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "sweetpad.testing.runWithoutBuilding",
+        "key": "ctrl+r",
+        "when": "view == testing"
+      },
+      {
+        "command": "sweetpad.testing.debugWithoutBuilding", 
+        "key": "ctrl+shift+d",
+        "when": "view == testing"
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "SweetPad",
       "properties": {
+        "sweetpad.testing.autoDiscover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically scan the workspace for tests (may be heavy in large repos)."
+        },
         "sweetpad.format.path": {
           "type": "string",
           "examples": [
