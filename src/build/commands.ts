@@ -60,6 +60,75 @@ async function ensureAppPathExists(appPath: string | undefined): Promise<string>
   return appPath;
 }
 
+/**
+ * Force kills any existing macOS app process with the given executable path.
+ * Retries up to 3 times to ensure the process is terminated.
+ */
+async function killMacOSProcess(executablePath: string): Promise<void> {
+  try {
+    const executableName = executablePath.split("/").pop();
+    if (!executableName) {
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    while (attempts < maxAttempts) {
+      attempts++;
+
+      try {
+        const stdout = await exec({ command: "pgrep", args: ["-x", executableName] });
+        const pids = stdout
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => Number.parseInt(s, 10))
+          .filter((n) => Number.isFinite(n));
+
+        if (pids.length === 0) {
+          break;
+        }
+
+        let killedAny = false;
+        for (const pid of pids) {
+          try {
+            const psOutput = await exec({ command: "ps", args: ["-p", pid.toString(), "-o", "command="] });
+            if (psOutput.trim().includes(executablePath)) {
+              try {
+                await exec({ command: "kill", args: ["-KILL", pid.toString()] });
+                commonLogger.log("Terminated macOS app process before launch", { pid, executablePath, attempt: attempts });
+                killedAny = true;
+              } catch (killError) {
+                try {
+                  await exec({ command: "ps", args: ["-p", pid.toString()] });
+                } catch (psError) {
+                  commonLogger.debug("Process already terminated", { pid });
+                }
+              }
+            }
+          } catch (e) {
+            commonLogger.debug("Failed to kill process or already terminated", { pid, error: e });
+          }
+        }
+
+        if (!killedAny) {
+          break;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (e) {
+        commonLogger.debug("No running process found", { executablePath, error: e });
+        break;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  } catch (e) {
+    commonLogger.warn("Failed to terminate macOS app process", { executablePath, error: e });
+  }
+}
+
 export async function runOnMac(
   context: ExtensionContext,
   terminal: TaskTerminal,
@@ -81,6 +150,9 @@ export async function runOnMac(
   });
 
   const executablePath = await ensureAppPathExists(buildSettings.executablePath);
+
+  // Always kill any existing process before launching to prevent "already being debugged" errors
+  await killMacOSProcess(executablePath);
 
   context.updateWorkspaceState("build.lastLaunchedApp", {
     type: "macos",

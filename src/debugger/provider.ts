@@ -5,6 +5,7 @@ import type {
   LastLaunchedAppMacOSContext,
   LastLaunchedAppSimulatorContext,
 } from "../common/commands";
+import { exec } from "../common/exec";
 import { commonLogger } from "../common/logger";
 import { checkUnreachable } from "../common/types";
 import { waitForProcessToLaunch } from "./utils";
@@ -54,6 +55,9 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
     config: vscode.DebugConfiguration,
     token?: vscode.CancellationToken | undefined,
   ): Promise<vscode.DebugConfiguration | undefined> {
+    // Kill any previous app process and terminate debug sessions BEFORE preLaunchTask runs
+    await this.terminateActiveDebugSessions();
+
     if (Object.keys(config).length === 0) {
       return ATTACH_CONFIG;
     }
@@ -154,6 +158,141 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
     return config;
   }
 
+  /**
+   * Terminates the macOS app process if it's running.
+   * Force kills with -KILL to ensure termination even if attached to a debugger.
+   * Retries if the process is still running after the first kill attempt.
+   */
+  private async terminateMacOSAppProcess(appPath: string): Promise<void> {
+    try {
+      // Extract the executable name from the path (e.g., "/path/to/App.app/Contents/MacOS/App" -> "App")
+      const executableName = appPath.split("/").pop();
+      if (!executableName) {
+        return;
+      }
+
+      // Find and kill processes, with retry logic
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        attempts++;
+        
+        try {
+          const stdout = await exec({ command: "pgrep", args: ["-x", executableName] });
+          const pids = stdout
+            .split(/\s+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => Number.parseInt(s, 10))
+            .filter((n) => Number.isFinite(n));
+
+          if (pids.length === 0) {
+            // No processes found, we're done
+            break;
+          }
+
+          let killedAny = false;
+          for (const pid of pids) {
+            try {
+              // Verify this is actually our process by checking the full path
+              const psOutput = await exec({ command: "ps", args: ["-p", pid.toString(), "-o", "command="] });
+              if (psOutput.trim().includes(appPath)) {
+                // Force kill the process with -KILL to ensure termination even if attached to debugger
+                try {
+                  await exec({ command: "kill", args: ["-KILL", pid.toString()] });
+                  commonLogger.log("Terminated macOS app process", { pid, appPath, attempt: attempts });
+                  killedAny = true;
+                } catch (killError) {
+                  // Process might have been killed by another process, check if it still exists
+                  try {
+                    await exec({ command: "ps", args: ["-p", pid.toString()] });
+                    // Process still exists, will retry
+                  } catch (psError) {
+                    // Process is gone, that's fine
+                    commonLogger.debug("Process already terminated", { pid });
+                  }
+                }
+              }
+            } catch (e) {
+              // Process might have already terminated, ignore
+              commonLogger.debug("Failed to kill process or already terminated", { pid, error: e });
+            }
+          }
+
+          if (!killedAny) {
+            // No processes to kill, we're done
+            break;
+          }
+
+          // Wait for cleanup between attempts
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        } catch (e) {
+          // pgrep returns non-zero if no processes found, which is fine
+          commonLogger.debug("No running process found for macOS app", { appPath, error: e });
+          break;
+        }
+      }
+
+      // Final cleanup delay
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    } catch (e) {
+      commonLogger.warn("Failed to terminate macOS app process", { appPath, error: e });
+    }
+  }
+
+  /**
+   * Terminates any active debug sessions to avoid "process already being debugged" errors.
+   * Also terminates the app process for macOS.
+   */
+  private async terminateActiveDebugSessions(): Promise<void> {
+    const activeSessions: vscode.DebugSession[] = [];
+    let currentSession = vscode.debug.activeDebugSession;
+    while (currentSession) {
+      if (activeSessions.find((s) => s.id === currentSession!.id)) {
+        break;
+      }
+      activeSessions.push(currentSession);
+      void vscode.debug.stopDebugging(currentSession);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      currentSession = vscode.debug.activeDebugSession;
+    }
+
+    // For macOS, also kill the app process
+    const launchContext = this.context.getWorkspaceState("build.lastLaunchedApp");
+    if (launchContext?.type === "macos") {
+      await this.terminateMacOSAppProcess(launchContext.appPath);
+    }
+
+    if (activeSessions.length === 0 && !launchContext) {
+      return;
+    }
+
+    try {
+      const terminationPromises = activeSessions.map((session) => {
+        return new Promise<void>((resolve) => {
+          const disposable = vscode.debug.onDidTerminateDebugSession((terminatedSession) => {
+            if (terminatedSession.id === session.id) {
+              clearTimeout(timeout);
+              disposable.dispose();
+              resolve();
+            }
+          });
+
+          const timeout = setTimeout(() => {
+            disposable.dispose();
+            resolve();
+          }, 3000);
+        });
+      });
+
+      await Promise.all(terminationPromises);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    } catch (e) {
+      commonLogger.warn("Failed to terminate debug sessions", { error: e });
+    }
+  }
+
   /*
    * We use this method because it runs after "preLaunchTask" is completed, "resolveDebugConfiguration"
    * runs before "preLaunchTask" so it's not suitable for our use case without some hacks.
@@ -163,6 +302,45 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
     config: vscode.DebugConfiguration,
     token?: vscode.CancellationToken | undefined,
   ): Promise<vscode.DebugConfiguration> {
+    // Only terminate debug sessions here - don't kill the app since we just launched it in preLaunchTask
+    const activeSessions: vscode.DebugSession[] = [];
+    let currentSession = vscode.debug.activeDebugSession;
+    while (currentSession) {
+      if (activeSessions.find((s) => s.id === currentSession!.id)) {
+        break;
+      }
+      activeSessions.push(currentSession);
+      void vscode.debug.stopDebugging(currentSession);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      currentSession = vscode.debug.activeDebugSession;
+    }
+
+    if (activeSessions.length > 0) {
+      try {
+        const terminationPromises = activeSessions.map((session) => {
+          return new Promise<void>((resolve) => {
+            const disposable = vscode.debug.onDidTerminateDebugSession((terminatedSession) => {
+              if (terminatedSession.id === session.id) {
+                clearTimeout(timeout);
+                disposable.dispose();
+                resolve();
+              }
+            });
+
+            const timeout = setTimeout(() => {
+              disposable.dispose();
+              resolve();
+            }, 3000);
+          });
+        });
+
+        await Promise.all(terminationPromises);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } catch (e) {
+        commonLogger.warn("Failed to terminate debug sessions", { error: e });
+      }
+    }
+
     const launchContext = this.context.getWorkspaceState("build.lastLaunchedApp");
     if (!launchContext) {
       throw new Error("No last launched app found, please launch the app first using the SweetPad extension");
