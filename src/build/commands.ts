@@ -163,9 +163,16 @@ export async function runOnMac(
   }
 
   context.updateProgressStatus(`Running "${options.scheme}" on Mac`);
+  
+  // Set OS_ACTIVITY_MODE to default if not already set, to ensure NSLog output is visible
+  const launchEnv = { 
+    ...options.launchEnv,
+    OS_ACTIVITY_MODE: options.launchEnv.OS_ACTIVITY_MODE || "default"
+  };
+  
   await terminal.execute({
     command: executablePath,
-    env: options.launchEnv,
+    env: launchEnv,
     args: options.launchArgs,
   });
 }
