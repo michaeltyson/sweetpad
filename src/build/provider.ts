@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { type ExtensionContext, TaskExecutionScope } from "../common/commands";
 import { getWorkspaceConfig } from "../common/config";
 import { errorReporting } from "../common/error-reporting";
+import { getBuildSettingsToLaunch } from "../common/cli/scripts";
 import {
   type TaskTerminal,
   TaskTerminalV1,
@@ -186,6 +187,17 @@ class ActionDispatcher {
 
     const launchArgs: string[] = definition.launchArgs ?? getWorkspaceConfig("build.launchArgs") ?? [];
     const launchEnv: { [key: string]: string } = definition.launchEnv ?? getWorkspaceConfig("build.launchEnv") ?? {};
+
+    this.context.updateProgressStatus("Extracting build settings");
+    const buildSettings = await getBuildSettingsToLaunch(
+      {
+        scheme: scheme,
+        configuration: configuration,
+        sdk: sdk,
+        xcworkspace: xcworkspace,
+      },
+      (message) => this.context.updateProgressStatus(message),
+    );
 
     await buildApp(this.context, terminal, {
       scheme: scheme,

@@ -78,7 +78,7 @@ export async function askDestinationToRunOn(
     mostUsedSort: true,
   });
 
-  // If we have cached desination, use it
+  // If we have cached destination, use it
   const cachedDestination = context.destinationsManager.getSelectedXcodeDestinationForBuild();
   if (cachedDestination) {
     const destination = destinations.find(
@@ -91,12 +91,16 @@ export async function askDestinationToRunOn(
 
   // We can remove platforms that are not supported by the build settings
   // WARNING: if want to avoid refetching build settings, move this logic to build manager or build context (not exist yet)
-  const buildSettings = await getBuildSettingsToAskDestination({
-    scheme: options.scheme,
-    configuration: options.configuration,
-    sdk: options.sdk,
-    xcworkspace: options.xcworkspace,
-  });
+  context.updateProgressStatus("Checking supported platforms");
+  const buildSettings = await getBuildSettingsToAskDestination(
+    {
+      scheme: options.scheme,
+      configuration: options.configuration,
+      sdk: options.sdk,
+      xcworkspace: options.xcworkspace,
+    },
+    (message) => context.updateProgressStatus(message),
+  );
   const supportedPlatforms = buildSettings?.supportedPlatforms;
 
   return await selectDestinationForBuild(context, {

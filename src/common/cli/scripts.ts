@@ -180,12 +180,15 @@ export class XcodeBuildSettings {
  * Pay attention that this function can return an empty array, if the build settings are not available.
  * Also it can return several build settings, if there are several targets assigned to the scheme.
  */
-async function getBuildSettingsList(options: {
-  scheme: string;
-  configuration: string;
-  sdk: string | undefined;
-  xcworkspace: string;
-}): Promise<XcodeBuildSettings[]> {
+async function getBuildSettingsList(
+  options: {
+    scheme: string;
+    configuration: string;
+    sdk: string | undefined;
+    xcworkspace: string;
+  },
+  progressCallback?: (message: string) => void,
+): Promise<XcodeBuildSettings[]> {
   const derivedDataPath = prepareDerivedDataPath();
 
   const args = [
@@ -204,6 +207,7 @@ async function getBuildSettingsList(options: {
     args.push("-sdk", options.sdk);
   }
 
+  progressCallback?.("Querying build settings from Xcode...");
   const stdout = await exec({
     command: "xcodebuild",
     args: args,
@@ -242,14 +246,17 @@ async function getBuildSettingsList(options: {
  * Extract build settings for the given scheme and configuration to suggest the destination
  * for the user to select
  */
-export async function getBuildSettingsToAskDestination(options: {
-  scheme: string;
-  configuration: string;
-  sdk: string | undefined;
-  xcworkspace: string;
-}): Promise<XcodeBuildSettings | null> {
+export async function getBuildSettingsToAskDestination(
+  options: {
+    scheme: string;
+    configuration: string;
+    sdk: string | undefined;
+    xcworkspace: string;
+  },
+  progressCallback?: (message: string) => void,
+): Promise<XcodeBuildSettings | null> {
   try {
-    const settings = await getBuildSettingsList(options);
+    const settings = await getBuildSettingsList(options, progressCallback);
 
     if (settings.length === 0) {
       return null;
@@ -276,13 +283,16 @@ export async function getBuildSettingsToAskDestination(options: {
  * and I just can use first settings object. But there is a cases when there are several targets
  * for the scheme and I need to find which target is set to launch in .xcscheme XML file.
  */
-export async function getBuildSettingsToLaunch(options: {
-  scheme: string;
-  configuration: string;
-  sdk: string | undefined;
-  xcworkspace: string;
-}): Promise<XcodeBuildSettings> {
-  const settings = await getBuildSettingsList(options);
+export async function getBuildSettingsToLaunch(
+  options: {
+    scheme: string;
+    configuration: string;
+    sdk: string | undefined;
+    xcworkspace: string;
+  },
+  progressCallback?: (message: string) => void,
+): Promise<XcodeBuildSettings> {
+  const settings = await getBuildSettingsList(options, progressCallback);
 
   // Build settings are required to run the app because we use them to locate the executable file or
   // the .app bundle. So let's just give up here if -showBuildSettings didn't return anything.
@@ -303,6 +313,7 @@ export async function getBuildSettingsToLaunch(options: {
   //    <LaunchAction>
   //      <BuildableProductRunnable>
   //        <BuildableReference BlueprintName=...>
+  progressCallback?.("Parsing scheme to find launch target...");
   const workspace = await XcodeWorkspace.parseWorkspace(options.xcworkspace);
   const scheme = await workspace.getScheme({ name: options.scheme });
   if (!scheme) {

@@ -142,12 +142,15 @@ export async function runOnMac(
   },
 ) {
   context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch({
-    scheme: options.scheme,
-    configuration: options.configuration,
-    sdk: "macosx",
-    xcworkspace: options.xcworkspace,
-  });
+  const buildSettings = await getBuildSettingsToLaunch(
+    {
+      scheme: options.scheme,
+      configuration: options.configuration,
+      sdk: "macosx",
+      xcworkspace: options.xcworkspace,
+    },
+    (message) => context.updateProgressStatus(message),
+  );
 
   const executablePath = await ensureAppPathExists(buildSettings.executablePath);
 
@@ -195,12 +198,15 @@ export async function runOniOSSimulator(
   const simulatorId = options.destination.udid;
 
   context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch({
-    scheme: options.scheme,
-    configuration: options.configuration,
-    sdk: options.sdk,
-    xcworkspace: options.xcworkspace,
-  });
+  const buildSettings = await getBuildSettingsToLaunch(
+    {
+      scheme: options.scheme,
+      configuration: options.configuration,
+      sdk: options.sdk,
+      xcworkspace: options.xcworkspace,
+    },
+    (message) => context.updateProgressStatus(message),
+  );
   const appPath = await ensureAppPathExists(buildSettings.appPath);
   const bundlerId = buildSettings.bundleIdentifier;
 
@@ -285,12 +291,15 @@ export async function runOniOSDevice(
   const { udid: deviceId, type: destinationType, name: destinationName } = destination;
 
   context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch({
-    scheme: scheme,
-    configuration: configuration,
-    sdk: option.sdk,
-    xcworkspace: option.xcworkspace,
-  });
+  const buildSettings = await getBuildSettingsToLaunch(
+    {
+      scheme: scheme,
+      configuration: configuration,
+      sdk: option.sdk,
+      xcworkspace: option.xcworkspace,
+    },
+    (message) => context.updateProgressStatus(message),
+  );
 
   const targetPath = await ensureAppPathExists(buildSettings.appPath);
   const bundlerId = buildSettings.bundleIdentifier;
@@ -597,20 +606,25 @@ class XcodeCommandBuilder {
 /**
  * Check if buildServer.json needs to be regenerated and regenerate it if needed
  */
-async function generateBuildServerConfigOnBuild(options: {
-  scheme: string;
-  xcworkspace: string;
-}): Promise<void> {
+async function generateBuildServerConfigOnBuild(
+  options: {
+    scheme: string;
+    xcworkspace: string;
+  },
+  progressCallback?: (message: string) => void,
+): Promise<void> {
   const isEnabled = getWorkspaceConfig("xcodebuildserver.autogenerate") ?? true;
   if (!isEnabled) {
     return;
   }
 
+  progressCallback?.("Checking build server configuration...");
   const isServerInstalled = await getIsXcodeBuildServerInstalled();
   if (!isServerInstalled) {
     return;
   }
 
+  progressCallback?.("Reading build server configuration...");
   let config: XcodeBuildServerConfig | undefined = undefined;
   try {
     config = await readXcodeBuildServerConfig();
@@ -622,6 +636,7 @@ async function generateBuildServerConfigOnBuild(options: {
   // - scheme does not match
   // - workspace does not exist
   // - build_root does not exist
+  progressCallback?.("Validating build server configuration...");
   const isConfigValid =
     config &&
     config.scheme === options.scheme &&
@@ -631,10 +646,12 @@ async function generateBuildServerConfigOnBuild(options: {
     (await isFileExists(config.workspace));
 
   if (!isConfigValid) {
+    progressCallback?.("Regenerating build server configuration...");
     await generateBuildServerConfig({
       xcworkspace: options.xcworkspace,
       scheme: options.scheme,
     });
+    progressCallback?.("Restarting Swift LSP server...");
     await restartSwiftLSP();
   }
 }
@@ -717,6 +734,14 @@ export async function buildApp(
     pipes = [{ command: "xcbeautify", args: [] }];
   }
 
+  await generateBuildServerConfigOnBuild(
+    {
+      scheme: options.scheme,
+      xcworkspace: options.xcworkspace,
+    },
+    (message) => context.updateProgressStatus(message),
+  );
+
   if (options.shouldClean) {
     context.updateProgressStatus(`Cleaning "${options.scheme}"`);
   } else if (options.shouldBuild) {
@@ -724,11 +749,6 @@ export async function buildApp(
   } else if (options.shouldTest) {
     context.updateProgressStatus(`Building "${options.scheme}"`);
   }
-
-  await generateBuildServerConfigOnBuild({
-    scheme: options.scheme,
-    xcworkspace: options.xcworkspace,
-  });
 
   await terminal.execute({
     command: commandParts[0],
@@ -842,11 +862,6 @@ async function commonLaunchCommand(
     item?.scheme ??
     (await askSchemeForBuild(context, { title: "Select scheme to build and run", xcworkspace: xcworkspace }));
 
-  await generateBuildServerConfigOnBuild({
-    scheme: scheme,
-    xcworkspace: xcworkspace,
-  });
-
   context.updateProgressStatus("Searching for configuration");
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
@@ -871,6 +886,17 @@ async function commonLaunchCommand(
     terminateLocked: true,
     problemMatchers: DEFAULT_BUILD_PROBLEM_MATCHERS,
     callback: async (terminal) => {
+      context.updateProgressStatus("Extracting build settings");
+      const buildSettings = await getBuildSettingsToLaunch(
+        {
+          scheme: scheme,
+          configuration: configuration,
+          sdk: sdk,
+          xcworkspace: xcworkspace,
+        },
+        (message) => context.updateProgressStatus(message),
+      );
+
       await buildApp(context, terminal, {
         scheme: scheme,
         sdk: sdk,
