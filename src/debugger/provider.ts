@@ -64,10 +64,76 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
     return config;
   }
 
+  /**
+   * Waits for the process to be in a clean state, ready for debugging.
+   * This helps prevent "process already being debugged" errors by ensuring
+   * any stale debugger attachments are cleared.
+   */
+  private async waitForCleanProcessState(appPath: string, maxWaitMs: number = 2000): Promise<void> {
+    const startTime = Date.now();
+    const executableName = appPath.split("/").pop();
+    if (!executableName) {
+      return;
+    }
+
+    while (Date.now() - startTime < maxWaitMs) {
+      try {
+        // Check if process exists
+        const stdout = await exec({ command: "pgrep", args: ["-x", executableName] });
+        const pids = stdout
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => Number.parseInt(s, 10))
+          .filter((n) => Number.isFinite(n));
+
+        let foundProcess = false;
+        for (const pid of pids) {
+          try {
+            const psOutput = await exec({ command: "ps", args: ["-p", pid.toString(), "-o", "command="] });
+            if (psOutput.trim().includes(appPath)) {
+              foundProcess = true;
+              // Process exists - check if there are any VS Code debug sessions still active
+              // If there are no active debug sessions, the process should be clean
+              const activeSession = vscode.debug.activeDebugSession;
+              if (!activeSession || activeSession.type !== "lldb") {
+                // No active LLDB session, process should be ready
+                // Wait a bit more to ensure any stale state clears
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                return;
+              }
+            }
+          } catch (e) {
+            commonLogger.debug("Failed to check process", { pid, error: e });
+          }
+        }
+
+        if (!foundProcess) {
+          // Process not found yet, wait a bit
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+
+        // Process exists but there might be a debug session, wait a bit
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      } catch (e) {
+        // Process not found yet, that's okay - wait
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    // Final wait to ensure any OS-level cleanup is complete
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
   private async resolveMacOSDebugConfiguration(
     config: vscode.DebugConfiguration,
     launchContext: LastLaunchedAppMacOSContext,
   ): Promise<vscode.DebugConfiguration> {
+    // Wait for the process to be in a clean state before attaching
+    // This helps prevent "process already being debugged" errors
+    await this.waitForCleanProcessState(launchContext.appPath);
+
     config.type = "lldb";
     config.waitFor = true;
     config.request = "attach";
@@ -287,7 +353,9 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
       });
 
       await Promise.all(terminationPromises);
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Wait longer to ensure OS-level debug state is cleared
+      // The P_TRACED flag can persist briefly after debugger termination
+      await new Promise((resolve) => setTimeout(resolve, 800));
     } catch (e) {
       commonLogger.warn("Failed to terminate debug sessions", { error: e });
     }
@@ -335,7 +403,9 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
         });
 
         await Promise.all(terminationPromises);
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Wait longer to ensure OS-level debug state is cleared
+        // The P_TRACED flag can persist briefly after debugger termination
+        await new Promise((resolve) => setTimeout(resolve, 800));
       } catch (e) {
         commonLogger.warn("Failed to terminate debug sessions", { error: e });
       }
