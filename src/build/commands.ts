@@ -5,6 +5,7 @@ import type { BuildTreeItem } from "./tree";
 import { showConfigurationPicker, showYesNoQuestion } from "../common/askers";
 import {
   type XcodeBuildServerConfig,
+  type XcodeBuildSettings,
   type XcodeScheme,
   generateBuildServerConfig,
   getBuildConfigurations,
@@ -33,7 +34,10 @@ import {
   askDestinationToRunOn,
   askSchemeForBuild,
   askXcodeWorkspacePath,
+  cacheBuildSettings,
   detectXcodeWorkspacesPaths,
+  getBuildSettingsCacheKey,
+  getCachedBuildSettings,
   getCurrentXcodeWorkspacePath,
   getWorkspacePath,
   prepareBundleDir,
@@ -139,18 +143,33 @@ export async function runOnMac(
     watchMarker: boolean;
     launchArgs: string[];
     launchEnv: Record<string, string>;
+    buildSettings?: XcodeBuildSettings;
   },
 ) {
-  context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch(
-    {
+  let buildSettings: XcodeBuildSettings;
+  if (options.buildSettings) {
+    buildSettings = options.buildSettings;
+  } else {
+    context.updateProgressStatus("Extracting build settings");
+    const cacheKey = getBuildSettingsCacheKey({
       scheme: options.scheme,
       configuration: options.configuration,
       sdk: "macosx",
       xcworkspace: options.xcworkspace,
-    },
-    (message) => context.updateProgressStatus(message),
-  );
+    });
+    buildSettings = getCachedBuildSettings(context, cacheKey) ?? await getBuildSettingsToLaunch(
+      {
+        scheme: options.scheme,
+        configuration: options.configuration,
+        sdk: "macosx",
+        xcworkspace: options.xcworkspace,
+      },
+      (message) => context.updateProgressStatus(message),
+    );
+    if (!options.buildSettings) {
+      await cacheBuildSettings(context, cacheKey, buildSettings);
+    }
+  }
 
   const executablePath = await ensureAppPathExists(buildSettings.executablePath);
 
@@ -193,20 +212,35 @@ export async function runOniOSSimulator(
     launchArgs: string[];
     launchEnv: Record<string, string>;
     debug: boolean;
+    buildSettings?: XcodeBuildSettings;
   },
 ) {
   const simulatorId = options.destination.udid;
 
-  context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch(
-    {
+  let buildSettings: XcodeBuildSettings;
+  if (options.buildSettings) {
+    buildSettings = options.buildSettings;
+  } else {
+    context.updateProgressStatus("Extracting build settings");
+    const cacheKey = getBuildSettingsCacheKey({
       scheme: options.scheme,
       configuration: options.configuration,
       sdk: options.sdk,
       xcworkspace: options.xcworkspace,
-    },
-    (message) => context.updateProgressStatus(message),
-  );
+    });
+    buildSettings = getCachedBuildSettings(context, cacheKey) ?? await getBuildSettingsToLaunch(
+      {
+        scheme: options.scheme,
+        configuration: options.configuration,
+        sdk: options.sdk,
+        xcworkspace: options.xcworkspace,
+      },
+      (message) => context.updateProgressStatus(message),
+    );
+    if (!options.buildSettings) {
+      await cacheBuildSettings(context, cacheKey, buildSettings);
+    }
+  }
   const appPath = await ensureAppPathExists(buildSettings.appPath);
   const bundlerId = buildSettings.bundleIdentifier;
 
@@ -285,21 +319,36 @@ export async function runOniOSDevice(
     watchMarker: boolean;
     launchArgs: string[];
     launchEnv: Record<string, string>;
+    buildSettings?: XcodeBuildSettings;
   },
 ) {
   const { scheme, configuration, destination } = option;
   const { udid: deviceId, type: destinationType, name: destinationName } = destination;
 
-  context.updateProgressStatus("Extracting build settings");
-  const buildSettings = await getBuildSettingsToLaunch(
-    {
+  let buildSettings: XcodeBuildSettings;
+  if (option.buildSettings) {
+    buildSettings = option.buildSettings;
+  } else {
+    context.updateProgressStatus("Extracting build settings");
+    const cacheKey = getBuildSettingsCacheKey({
       scheme: scheme,
       configuration: configuration,
       sdk: option.sdk,
       xcworkspace: option.xcworkspace,
-    },
-    (message) => context.updateProgressStatus(message),
-  );
+    });
+    buildSettings = getCachedBuildSettings(context, cacheKey) ?? await getBuildSettingsToLaunch(
+      {
+        scheme: scheme,
+        configuration: configuration,
+        sdk: option.sdk,
+        xcworkspace: option.xcworkspace,
+      },
+      (message) => context.updateProgressStatus(message),
+    );
+    if (!option.buildSettings) {
+      cacheBuildSettings(context, cacheKey, buildSettings);
+    }
+  }
 
   const targetPath = await ensureAppPathExists(buildSettings.appPath);
   const bundlerId = buildSettings.bundleIdentifier;
@@ -734,14 +783,6 @@ export async function buildApp(
     pipes = [{ command: "xcbeautify", args: [] }];
   }
 
-  await generateBuildServerConfigOnBuild(
-    {
-      scheme: options.scheme,
-      xcworkspace: options.xcworkspace,
-    },
-    (message) => context.updateProgressStatus(message),
-  );
-
   if (options.shouldClean) {
     context.updateProgressStatus(`Cleaning "${options.scheme}"`);
   } else if (options.shouldBuild) {
@@ -750,12 +791,24 @@ export async function buildApp(
     context.updateProgressStatus(`Building "${options.scheme}"`);
   }
 
+  // Run build server config generation in parallel with the build to avoid blocking
+  const buildServerConfigPromise = generateBuildServerConfigOnBuild(
+    {
+      scheme: options.scheme,
+      xcworkspace: options.xcworkspace,
+    },
+    // Don't pass progress callback to avoid overwriting "Building" status
+  );
+
   await terminal.execute({
     command: commandParts[0],
     args: commandParts.slice(1),
     pipes: pipes,
     env: env,
   });
+
+  // Wait for build server config generation to complete
+  await buildServerConfigPromise;
 
   await restartSwiftLSP();
 }
@@ -800,7 +853,7 @@ async function commonBuildCommand(
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
   context.updateProgressStatus("Searching for destination");
-  const destination = await askDestinationToRunOn(context, {
+  const { destination } = await askDestinationToRunOn(context, {
     scheme: scheme,
     configuration: configuration,
     sdk: undefined,
@@ -866,7 +919,7 @@ async function commonLaunchCommand(
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
   context.updateProgressStatus("Searching for destination");
-  const destination = await askDestinationToRunOn(context, {
+  const { destination } = await askDestinationToRunOn(context, {
     scheme: scheme,
     configuration: configuration,
     sdk: undefined,
@@ -886,16 +939,29 @@ async function commonLaunchCommand(
     terminateLocked: true,
     problemMatchers: DEFAULT_BUILD_PROBLEM_MATCHERS,
     callback: async (terminal) => {
-      context.updateProgressStatus("Extracting build settings");
-      const buildSettings = await getBuildSettingsToLaunch(
-        {
-          scheme: scheme,
-          configuration: configuration,
-          sdk: sdk,
-          xcworkspace: xcworkspace,
-        },
-        (message) => context.updateProgressStatus(message),
-      );
+      // Check cache with the correct SDK (we now know the actual SDK from the destination)
+      const cacheKey = getBuildSettingsCacheKey({
+        scheme: scheme,
+        configuration: configuration,
+        sdk: sdk,
+        xcworkspace: xcworkspace,
+      });
+      let buildSettings: XcodeBuildSettings | null = getCachedBuildSettings(context, cacheKey);
+
+      // If not in cache, fetch and cache it
+      if (!buildSettings) {
+        context.updateProgressStatus("Extracting build settings");
+        buildSettings = await getBuildSettingsToLaunch(
+          {
+            scheme: scheme,
+            configuration: configuration,
+            sdk: sdk,
+            xcworkspace: xcworkspace,
+          },
+          (message) => context.updateProgressStatus(message),
+        );
+        await cacheBuildSettings(context, cacheKey, buildSettings);
+      }
 
       await buildApp(context, terminal, {
         scheme: scheme,
@@ -917,6 +983,7 @@ async function commonLaunchCommand(
           watchMarker: false,
           launchArgs: launchArgs,
           launchEnv: launchEnv,
+          buildSettings: buildSettings,
         });
       } else if (
         destination.type === "iOSSimulator" ||
@@ -934,6 +1001,7 @@ async function commonLaunchCommand(
           launchArgs: launchArgs,
           launchEnv: launchEnv,
           debug: options.debug,
+          buildSettings: buildSettings,
         });
       } else if (
         destination.type === "iOSDevice" ||
@@ -950,6 +1018,7 @@ async function commonLaunchCommand(
           watchMarker: false,
           launchArgs: launchArgs,
           launchEnv: launchEnv,
+          buildSettings: buildSettings,
         });
       } else {
         assertUnreachable(destination);
@@ -994,7 +1063,7 @@ async function commonRunCommand(
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
   context.updateProgressStatus("Searching for destination");
-  const destination = await askDestinationToRunOn(context, {
+  const { destination } = await askDestinationToRunOn(context, {
     scheme: scheme,
     configuration: configuration,
     sdk: undefined,
@@ -1076,7 +1145,7 @@ export async function cleanCommand(context: ExtensionContext, item?: BuildTreeIt
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
   context.updateProgressStatus("Searching for destination");
-  const destination = await askDestinationToRunOn(context, {
+  const { destination } = await askDestinationToRunOn(context, {
     scheme: scheme,
     configuration: configuration,
     sdk: undefined,
@@ -1119,7 +1188,7 @@ export async function testCommand(context: ExtensionContext, item?: BuildTreeIte
   const configuration = await askConfiguration(context, { xcworkspace: xcworkspace });
 
   context.updateProgressStatus("Searching for destination");
-  const destination = await askDestinationToRunOn(context, {
+  const { destination } = await askDestinationToRunOn(context, {
     scheme: scheme,
     configuration: configuration,
     sdk: undefined,

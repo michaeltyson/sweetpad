@@ -48,6 +48,7 @@ type WorkspaceTypes = {
   "build.xcodeSdk": string;
   "build.lastLaunchedApp": LastLaunchedAppContext;
   "build.xcodeBuildServerAutogenreateInfoShown": boolean;
+  "build.xcodeBuildSettingsCache": string;
   "testing.xcodeTarget": string;
   "testing.xcodeConfiguration": string;
   "testing.xcodeDestination": SelectedDestination;
@@ -249,8 +250,8 @@ export class ExtensionContext {
     return this._sessionState.get(key) as T | undefined;
   }
 
-  updateWorkspaceState<T extends WorkspaceStateKey>(key: T, value: WorkspaceTypes[T] | undefined) {
-    this._context.workspaceState.update(`sweetpad.${key}`, value);
+  async updateWorkspaceState<T extends WorkspaceStateKey>(key: T, value: WorkspaceTypes[T] | undefined): Promise<void> {
+    await this._context.workspaceState.update(`sweetpad.${key}`, value);
   }
 
   getWorkspaceState<T extends WorkspaceStateKey>(key: T): WorkspaceTypes[T] | undefined {

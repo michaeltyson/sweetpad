@@ -291,7 +291,13 @@ export async function getBuildSettingsToLaunch(
     xcworkspace: string;
   },
   progressCallback?: (message: string) => void,
+  cachedSettings?: XcodeBuildSettings | null,
 ): Promise<XcodeBuildSettings> {
+  // Return cached settings if available and valid
+  if (cachedSettings) {
+    return cachedSettings;
+  }
+
   const settings = await getBuildSettingsList(options, progressCallback);
 
   // Build settings are required to run the app because we use them to locate the executable file or

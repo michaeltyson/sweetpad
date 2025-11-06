@@ -3,13 +3,13 @@ import * as vscode from "vscode";
 import { type QuickPickItem, showQuickPick } from "../common/quick-pick";
 
 import { askConfigurationBase } from "../common/askers";
-import { getBuildSettingsToAskDestination, getSchemes } from "../common/cli/scripts";
+import { getBuildSettingsToAskDestination, getSchemes, XcodeBuildSettings, type XcodeBuildSettings as XcodeBuildSettingsType } from "../common/cli/scripts";
 import type { ExtensionContext } from "../common/commands";
 import { getWorkspaceConfig } from "../common/config";
 import { ExtensionError } from "../common/errors";
 import { createDirectory, findFilesRecursive, isFileExists, removeDirectory } from "../common/files";
 import { commonLogger } from "../common/logger";
-import type { DestinationPlatform } from "../destination/constants";
+import { SUPPORTED_DESTINATION_PLATFORMS, type DestinationPlatform } from "../destination/constants";
 import type { Destination } from "../destination/types";
 import { splitSupportedDestinatinos } from "../destination/utils";
 import type { SimulatorDestination } from "../simulators/types";
@@ -62,6 +62,91 @@ export async function askSimulator(
 }
 
 /**
+ * Generate a cache key for build settings based on the options
+ *
+ * @param options - Build settings options including scheme, configuration, SDK, and workspace path
+ * @returns A unique cache key string for the given build settings combination
+ */
+export function getBuildSettingsCacheKey(options: {
+  scheme: string;
+  configuration: string;
+  sdk: string | undefined;
+  xcworkspace: string;
+}): string {
+  const normalizedWorkspace = path.normalize(options.xcworkspace);
+  const workspacePath = getWorkspacePath();
+  const relativeWorkspace = path.relative(workspacePath, normalizedWorkspace);
+  return `${options.scheme}:${options.configuration}:${options.sdk ?? "default"}:${relativeWorkspace}`;
+}
+
+/**
+ * Get cached build settings from workspace state
+ *
+ * @param context - Extension context for accessing workspace state
+ * @param cacheKey - The cache key to look up
+ * @returns Cached build settings if found and valid, null otherwise
+ */
+export function getCachedBuildSettings(
+  context: ExtensionContext,
+  cacheKey: string,
+): XcodeBuildSettingsType | null {
+  const cached = context.getWorkspaceState("build.xcodeBuildSettingsCache");
+  if (!cached || typeof cached !== "string") {
+    return null;
+  }
+
+  try {
+    const cacheData = JSON.parse(cached);
+    if (cacheData.key === cacheKey && cacheData.settingsData && cacheData.target) {
+      // Reconstruct the XcodeBuildSettings class instance from cached data
+      commonLogger.log("Build settings cache HIT", { cacheKey });
+      return new XcodeBuildSettings({
+        settings: cacheData.settingsData,
+        target: cacheData.target,
+      });
+    }
+  } catch (e) {
+    commonLogger.warn("Failed to parse cached build settings", { error: e, cacheKey });
+  }
+
+  return null;
+}
+
+/**
+ * Cache build settings in workspace state
+ *
+ * Serializes the build settings and stores them in workspace state for future use.
+ * The settings are stored with the provided cache key for later retrieval.
+ *
+ * @param context - Extension context for accessing workspace state
+ * @param cacheKey - The cache key to use for storage
+ * @param settings - The build settings to cache
+ */
+export async function cacheBuildSettings(
+  context: ExtensionContext,
+  cacheKey: string,
+  settings: XcodeBuildSettingsType,
+): Promise<void> {
+  try {
+    // Access the private settings property to store the raw data
+    // We'll reconstruct the XcodeBuildSettings instance when retrieving from cache
+    const settingsData = (settings as any).settings;
+    if (!settingsData) {
+      commonLogger.warn("Cannot cache build settings: settings data is missing", { cacheKey });
+      return;
+    }
+    const cacheData = JSON.stringify({
+      key: cacheKey,
+      settingsData: settingsData,
+      target: settings.target,
+    });
+    await context.updateWorkspaceState("build.xcodeBuildSettingsCache", cacheData);
+  } catch (e) {
+    commonLogger.warn("Failed to cache build settings", { error: e, cacheKey });
+  }
+}
+
+/**
  * Ask user to select simulator or device to run on
  */
 export async function askDestinationToRunOn(
@@ -72,11 +157,33 @@ export async function askDestinationToRunOn(
     sdk: string | undefined;
     xcworkspace: string;
   },
-): Promise<Destination> {
+): Promise<{ destination: Destination; buildSettings: XcodeBuildSettings | null }> {
   context.updateProgressStatus("Searching for destinations");
   const destinations = await context.destinationsManager.getDestinations({
     mostUsedSort: true,
   });
+
+  // Check if we have cached build settings for any SDK for this scheme/config
+  // This avoids fetching when we just need to check supported platforms
+  let buildSettings: XcodeBuildSettings | null = null;
+  if (options.sdk === undefined) {
+    // Try to find cached settings for any SDK - we'll use the first one we find
+    // This is a heuristic: if we have cached settings for any SDK, the supported platforms are likely the same
+    // Note: SDK strings match DestinationPlatform values
+    for (const sdk of SUPPORTED_DESTINATION_PLATFORMS) {
+      const testCacheKey = getBuildSettingsCacheKey({
+        scheme: options.scheme,
+        configuration: options.configuration,
+        sdk: sdk,
+        xcworkspace: options.xcworkspace,
+      });
+      const cached = getCachedBuildSettings(context, testCacheKey);
+      if (cached) {
+        buildSettings = cached;
+        break;
+      }
+    }
+  }
 
   // If we have cached destination, use it
   const cachedDestination = context.destinationsManager.getSelectedXcodeDestinationForBuild();
@@ -85,28 +192,45 @@ export async function askDestinationToRunOn(
       (destination) => destination.id === cachedDestination.id && destination.type === cachedDestination.type,
     );
     if (destination) {
-      return destination;
+      // Only fetch if we don't have cached settings to check supported platforms
+      if (!buildSettings) {
+        context.updateProgressStatus("Checking supported platforms");
+        buildSettings = await getBuildSettingsToAskDestination(
+          {
+            scheme: options.scheme,
+            configuration: options.configuration,
+            sdk: options.sdk,
+            xcworkspace: options.xcworkspace,
+          },
+          (message) => context.updateProgressStatus(message),
+        );
+      }
+      return { destination, buildSettings: null }; // Don't return buildSettings here - cache will be done later
     }
   }
 
   // We can remove platforms that are not supported by the build settings
   // WARNING: if want to avoid refetching build settings, move this logic to build manager or build context (not exist yet)
-  context.updateProgressStatus("Checking supported platforms");
-  const buildSettings = await getBuildSettingsToAskDestination(
-    {
-      scheme: options.scheme,
-      configuration: options.configuration,
-      sdk: options.sdk,
-      xcworkspace: options.xcworkspace,
-    },
-    (message) => context.updateProgressStatus(message),
-  );
+  if (!buildSettings) {
+    context.updateProgressStatus("Checking supported platforms");
+    buildSettings = await getBuildSettingsToAskDestination(
+      {
+        scheme: options.scheme,
+        configuration: options.configuration,
+        sdk: options.sdk,
+        xcworkspace: options.xcworkspace,
+      },
+      (message) => context.updateProgressStatus(message),
+    );
+  }
   const supportedPlatforms = buildSettings?.supportedPlatforms;
 
-  return await selectDestinationForBuild(context, {
+  const destination = await selectDestinationForBuild(context, {
     destinations: destinations,
     supportedPlatforms: supportedPlatforms,
   });
+
+  return { destination, buildSettings };
 }
 
 export async function selectDestinationForBuild(

@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { type ExtensionContext, TaskExecutionScope } from "../common/commands";
 import { getWorkspaceConfig } from "../common/config";
 import { errorReporting } from "../common/error-reporting";
-import { getBuildSettingsToLaunch } from "../common/cli/scripts";
+import { getBuildSettingsToLaunch, type XcodeBuildSettings } from "../common/cli/scripts";
 import {
   type TaskTerminal,
   TaskTerminalV1,
@@ -22,7 +22,15 @@ import {
   runOniOSSimulator,
 } from "./commands";
 import { DEFAULT_BUILD_PROBLEM_MATCHERS } from "./constants";
-import { askConfiguration, askDestinationToRunOn, askSchemeForBuild, askXcodeWorkspacePath } from "./utils";
+import {
+  askConfiguration,
+  askDestinationToRunOn,
+  askSchemeForBuild,
+  askXcodeWorkspacePath,
+  cacheBuildSettings,
+  getBuildSettingsCacheKey,
+  getCachedBuildSettings,
+} from "./utils";
 
 interface TaskDefinition extends vscode.TaskDefinition {
   type: string;
@@ -124,23 +132,23 @@ class ActionDispatcher {
     scheme: string;
     configuration: string;
     xcworkspace: string;
-  }): Promise<Destination> {
+  }): Promise<{ destination: Destination; buildSettings: XcodeBuildSettings | null }> {
     // If user has provided the ID of the destination, then use it directly
     const inputDestination = await this.getDestinationByUserInput(this.context, {
       definition: options.definition,
     });
     if (inputDestination) {
-      return inputDestination;
+      // Return null build settings since we don't have them for user-provided destinations
+      return { destination: inputDestination, buildSettings: null };
     }
 
     // If not in task definition, then ask user to select destination (or get from cache)
-    const destination = await askDestinationToRunOn(this.context, {
+    return await askDestinationToRunOn(this.context, {
       scheme: options.scheme,
       configuration: options.configuration,
       sdk: undefined,
       xcworkspace: options.xcworkspace,
     });
-    return destination;
   }
 
   private async launchCallback(terminal: TaskTerminal, definition: TaskDefinition) {
@@ -174,7 +182,7 @@ class ActionDispatcher {
         xcworkspace: xcworkspace,
       }));
 
-    const destination = await this.getDestination({
+    const { destination, buildSettings: cachedBuildSettings } = await this.getDestination({
       definition: definition,
       scheme: scheme,
       configuration: configuration,
@@ -188,16 +196,30 @@ class ActionDispatcher {
     const launchArgs: string[] = definition.launchArgs ?? getWorkspaceConfig("build.launchArgs") ?? [];
     const launchEnv: { [key: string]: string } = definition.launchEnv ?? getWorkspaceConfig("build.launchEnv") ?? {};
 
-    this.context.updateProgressStatus("Extracting build settings");
-    const buildSettings = await getBuildSettingsToLaunch(
-      {
-        scheme: scheme,
-        configuration: configuration,
-        sdk: sdk,
-        xcworkspace: xcworkspace,
-      },
-      (message) => this.context.updateProgressStatus(message),
-    );
+    // Check cache with the correct SDK (we now know the actual SDK from the destination)
+    const cacheKey = getBuildSettingsCacheKey({
+      scheme: scheme,
+      configuration: configuration,
+      sdk: sdk,
+      xcworkspace: xcworkspace,
+    });
+    let buildSettings: XcodeBuildSettings | null = getCachedBuildSettings(this.context, cacheKey);
+
+    // If not in cache, fetch and cache it
+    if (!buildSettings) {
+      this.context.updateProgressStatus("Extracting build settings");
+      buildSettings = await getBuildSettingsToLaunch(
+        {
+          scheme: scheme,
+          configuration: configuration,
+          sdk: sdk,
+          xcworkspace: xcworkspace,
+        },
+        (message) => this.context.updateProgressStatus(message),
+      );
+      // Cache the fetched settings for next time
+      await cacheBuildSettings(this.context, cacheKey, buildSettings);
+    }
 
     await buildApp(this.context, terminal, {
       scheme: scheme,
@@ -219,6 +241,7 @@ class ActionDispatcher {
         watchMarker: true,
         launchArgs: launchArgs,
         launchEnv: launchEnv,
+        buildSettings: buildSettings,
       });
     } else if (
       destination.type === "iOSSimulator" ||
@@ -236,6 +259,7 @@ class ActionDispatcher {
         launchArgs: launchArgs,
         launchEnv: launchEnv,
         debug: options.debug,
+        buildSettings: buildSettings,
       });
     } else if (
       destination.type === "iOSDevice" ||
@@ -252,6 +276,7 @@ class ActionDispatcher {
         watchMarker: true,
         launchArgs: launchArgs,
         launchEnv: launchEnv,
+        buildSettings: buildSettings,
       });
     } else {
       assertUnreachable(destination);
@@ -288,7 +313,7 @@ class ActionDispatcher {
         xcworkspace: xcworkspace,
       }));
 
-    const destination = await this.getDestination({
+    const { destination } = await this.getDestination({
       definition: definition,
       scheme: scheme,
       configuration: configuration,
@@ -342,7 +367,7 @@ class ActionDispatcher {
         xcworkspace: xcworkspace,
       }));
 
-    const destination = await this.getDestination({
+    const { destination } = await this.getDestination({
       definition: definition,
       scheme: scheme,
       configuration: configuration,
@@ -355,6 +380,30 @@ class ActionDispatcher {
     const launchArgs: string[] = definition.launchArgs ?? getWorkspaceConfig("build.launchArgs") ?? [];
     const launchEnv: { [key: string]: string } = definition.launchEnv ?? getWorkspaceConfig("build.launchEnv") ?? {};
 
+    // Check cache for build settings
+    const cacheKey = getBuildSettingsCacheKey({
+      scheme: scheme,
+      configuration: configuration,
+      sdk: sdk,
+      xcworkspace: xcworkspace,
+    });
+    let buildSettings: XcodeBuildSettings | null = getCachedBuildSettings(this.context, cacheKey);
+
+    // If not in cache, fetch and cache it
+    if (!buildSettings) {
+      this.context.updateProgressStatus("Extracting build settings");
+      buildSettings = await getBuildSettingsToLaunch(
+        {
+          scheme: scheme,
+          configuration: configuration,
+          sdk: sdk,
+          xcworkspace: xcworkspace,
+        },
+        (message) => this.context.updateProgressStatus(message),
+      );
+      cacheBuildSettings(this.context, cacheKey, buildSettings);
+    }
+
     if (destination.type === "macOS") {
       await runOnMac(this.context, terminal, {
         scheme: scheme,
@@ -363,6 +412,7 @@ class ActionDispatcher {
         watchMarker: false,
         launchArgs: launchArgs,
         launchEnv: launchEnv,
+        buildSettings: buildSettings,
       });
     } else if (
       destination.type === "iOSSimulator" ||
@@ -380,6 +430,7 @@ class ActionDispatcher {
         launchArgs: launchArgs,
         launchEnv: launchEnv,
         debug: options.debug,
+        buildSettings: buildSettings,
       });
     } else if (
       destination.type === "iOSDevice" ||
@@ -396,6 +447,7 @@ class ActionDispatcher {
         watchMarker: true,
         launchArgs: launchArgs,
         launchEnv: launchEnv,
+        buildSettings: buildSettings,
       });
     } else {
       assertUnreachable(destination);
@@ -420,7 +472,7 @@ class ActionDispatcher {
         xcworkspace: xcworkspace,
       }));
 
-    const destination = await this.getDestination({
+    const { destination } = await this.getDestination({
       definition: definition,
       scheme: scheme,
       configuration: configuration,
@@ -460,7 +512,7 @@ class ActionDispatcher {
         xcworkspace: xcworkspace,
       }));
 
-    const destination = await this.getDestination({
+    const { destination } = await this.getDestination({
       definition: definition,
       scheme: scheme,
       configuration: configuration,
