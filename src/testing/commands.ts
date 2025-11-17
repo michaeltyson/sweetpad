@@ -66,9 +66,19 @@ export async function refreshTestsCommand(context: ExtensionContext): Promise<vo
  */
 export async function runAllTestsCommand(context: ExtensionContext): Promise<void> {
   context.updateProgressStatus("Running all discovered tests");
-  const request = new vscode.TestRunRequest(undefined, [], undefined, undefined);
+  const schemeItems = [...context.testingManager.controller.items].map(([, item]) => item);
+  if (schemeItems.length === 0) {
+    vscode.window.showInformationMessage("No tests discovered.");
+    return;
+  }
   const tokenSource = new vscode.CancellationTokenSource();
-  await context.testingManager.buildAndRunTests(request, tokenSource.token);
+  for (const schemeItem of schemeItems) {
+    if (schemeItem.children.size === 0) {
+      continue;
+    }
+    const request = new vscode.TestRunRequest([schemeItem], [], undefined, undefined);
+    await context.testingManager.buildAndRunTests(request, tokenSource.token);
+  }
 }
 
 /**
@@ -79,9 +89,15 @@ export async function runTestByNameCommand(context: ExtensionContext): Promise<v
 
   const items: { label: string; item: vscode.TestItem }[] = [];
   for (const [, root] of context.testingManager.controller.items) {
-    items.push({ label: root.id, item: root });
-    for (const [, child] of root.children) {
-      items.push({ label: child.id, item: child });
+    const schemeLabel = root.label ?? root.id;
+    items.push({ label: `${schemeLabel} (scheme)`, item: root });
+    for (const [, classItem] of root.children) {
+      const classLabel = classItem.label ?? classItem.id;
+      items.push({ label: `${schemeLabel} › ${classLabel}`, item: classItem });
+      for (const [, methodItem] of classItem.children) {
+        const methodLabel = methodItem.label ?? methodItem.id;
+        items.push({ label: `${schemeLabel} › ${classLabel}.${methodLabel}`, item: methodItem });
+      }
     }
   }
 
