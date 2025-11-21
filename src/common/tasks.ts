@@ -147,7 +147,8 @@ export class TaskTerminalV2 implements vscode.Pseudoterminal, TaskTerminal {
     }
 
     // Combine them into a big pipe with error propagation
-    const commands = [mainCommand];
+    // Redirect stderr to stdout (2>&1) before piping to ensure all output is captured
+    const commands = [`${mainCommand} 2>&1`];
     commands.push(...options.pipes.map((pipe) => this.command(pipe.command, pipe.args)));
     return `set -o pipefail;  ${commands.join(" | ")}`;
   }

@@ -732,6 +732,11 @@ export async function buildApp(
 
   // ex: { "ARG1": "value1", "ARG2": null, "ARG3": "value3" }
   const env = getWorkspaceConfig("build.env") || {};
+  
+  // Enable unbuffered I/O when using xcbeautify for live output
+  if (useXcbeatify) {
+    env["NSUnbufferedIO"] = "YES";
+  }
 
   const command = new XcodeCommandBuilder();
   if (arch) {

@@ -971,6 +971,7 @@ export class TestingManager {
             ...(options.onlyTestingArgs ?? []),
           ],
           pipes: useXcbeautify ? [{ command: "xcbeautify", args: [] }] : undefined,
+          env: useXcbeautify ? { NSUnbufferedIO: "YES" } : undefined,
         });
       },
     });
