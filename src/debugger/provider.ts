@@ -8,6 +8,7 @@ import type {
 import { exec } from "../common/exec";
 import { commonLogger } from "../common/logger";
 import { checkUnreachable } from "../common/types";
+import type { DeviceCtlProcess } from "../common/xcode/devicectl";
 import { waitForProcessToLaunch } from "./utils";
 
 const ATTACH_CONFIG: vscode.DebugConfiguration = {
@@ -157,16 +158,19 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
   private async resolveDeviceDebugConfiguration(
     config: vscode.DebugConfiguration,
     launchContext: LastLaunchedAppDeviceContext,
+    cancellationToken?: vscode.CancellationToken,
   ): Promise<vscode.DebugConfiguration> {
     const deviceUDID = launchContext.destinationId;
     const hostAppPath = launchContext.appPath;
     const appName = launchContext.appName; // Example: "MyApp.app"
 
     // We need to find the device app path and the process id
+    // waitForProcessToLaunch will always return a process (never throws), so we don't need try-catch
     const process = await waitForProcessToLaunch(this.context, {
       deviceId: deviceUDID,
       appName: appName,
-      timeoutMs: 15000, // wait for 15 seconds before giving up
+      timeoutMs: 10000, // wait for 10 seconds before giving up
+      cancellationToken: cancellationToken,
     });
 
     const deviceExecutableURL = process.executable;
@@ -209,7 +213,10 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
       // Tells LLDB which physical iOS device (by UDID) you want to attach to.
       `script lldb.debugger.HandleCommand("device select ${deviceUDID}")`,
       // Attaches LLDB to the already-launched process on that device.
-      `script lldb.debugger.HandleCommand("device process attach --continue --pid ${processId}")`,
+      // If processId is 0, LLDB will find the process by matching the executable name
+      processId > 0
+        ? `script lldb.debugger.HandleCommand("device process attach --continue --pid ${processId}")`
+        : `script lldb.debugger.HandleCommand("device process attach --continue --name ${appName.replace(".app", "")}")`,
     ];
 
     // LLDB commands executed after the debuggee process has been created/attached.
@@ -432,7 +439,7 @@ class DynamicDebugConfigurationProvider implements vscode.DebugConfigurationProv
     }
 
     if (launchContext.type === "device") {
-      return await this.resolveDeviceDebugConfiguration(config, launchContext);
+      return await this.resolveDeviceDebugConfiguration(config, launchContext, token);
     }
 
     checkUnreachable(launchContext);

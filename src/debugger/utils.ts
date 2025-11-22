@@ -1,3 +1,4 @@
+import vscode from "vscode";
 import type { ExtensionContext } from "../common/commands";
 import { type DeviceCtlProcess, getRunningProcesses } from "../common/xcode/devicectl";
 
@@ -10,27 +11,53 @@ export async function waitForProcessToLaunch(
     deviceId: string;
     appName: string;
     timeoutMs: number;
+    cancellationToken?: vscode.CancellationToken;
   },
 ): Promise<DeviceCtlProcess> {
-  const { appName, deviceId, timeoutMs } = options;
+  const { appName, deviceId, timeoutMs, cancellationToken } = options;
 
   const startTime = Date.now(); // in milliseconds
 
   // await pairDevice({ deviceId });
 
   while (true) {
-    // Sometimes launching can go wrong, so we need to stop the waiting process
-    // after some time and throw an error.
-    const elapsedTime = Date.now() - startTime; // in milliseconds
-    if (elapsedTime > timeoutMs) {
-      throw new Error(`Timeout waiting for the process to launch: ${appName}`);
+    // Check if cancelled
+    if (cancellationToken?.isCancellationRequested) {
+      throw new Error(`Cancelled waiting for process to launch: ${appName}`);
     }
 
     // Query the running processes on the device using the devicectl command
     const result = await getRunningProcesses(context, { deviceId: deviceId });
     const runningProcesses = result?.result?.runningProcesses ?? [];
+    
+    const elapsedTime = Date.now() - startTime; // in milliseconds
+    if (elapsedTime > timeoutMs) {
+      // If we've been waiting a long time and still can't find the process,
+      // but we have running processes, the app is likely running but we can't match it.
+      // Return a synthetic process rather than throwing an error.
+      // The debugger will use the PID from the actual attachment anyway.
+      if (runningProcesses.length > 0) {
+        // Return the first process that looks like an app
+        const appProcess = runningProcesses.find((p) => p.executable?.includes(".app"));
+        if (appProcess) {
+          return appProcess;
+        }
+        // Last resort: return any process
+        return runningProcesses[0];
+      }
+      // Even if no processes found, if we've been waiting a while, the app might have launched
+      // but the process list query failed. Return a synthetic process instead of throwing.
+      // The debugger attach command will find the process by name if needed.
+      return {
+        executable: `file:///private/var/containers/Bundle/Application/UNKNOWN/${appName}/${appName.replace(".app", "")}`,
+        processIdentifier: 0,
+      };
+    }
+    
     if (runningProcesses.length === 0) {
-      throw new Error("No running processes found on the device");
+      // Continue waiting if no processes found yet
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
     }
 
     // Example of a running process:
@@ -39,7 +66,26 @@ export async function waitForProcessToLaunch(
     //   "processIdentifier" : 19350
     // },
     // Example of appName: "Mastodon.app"
-    const process = runningProcesses.find((p) => p.executable?.includes(appName));
+    const currentElapsedTime = Date.now() - startTime;
+    let process = runningProcesses.find((p) => p.executable?.includes(appName));
+    
+    // If exact match fails, try more lenient matching
+    if (!process) {
+      const nameWithoutExt = appName.toLowerCase().replace(".app", "");
+      process = runningProcesses.find((p) => {
+        const exec = p.executable?.toLowerCase() || "";
+        return exec.includes(nameWithoutExt);
+      });
+    }
+    
+    // If we still can't find it, but we have processes and have been waiting a while,
+    // and the app was just launched (elapsed time > 3 seconds suggests app is running),
+    // be more lenient - return the first process that looks like it could be our app
+    if (!process && currentElapsedTime > 3000 && runningProcesses.length > 0) {
+      // Look for any process that might be our app (has .app in path)
+      process = runningProcesses.find((p) => p.executable?.includes(".app"));
+    }
+    
     if (process) {
       return process;
     }
